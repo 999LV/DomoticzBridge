@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<root xmlns="urn:schemas-upnp-org:device-1-0">
+  <specVersion>
+    <major>1</major>
+    <minor>0</minor>
+  </specVersion>
+  <device>
+    <deviceType>DomoticzBridge</deviceType>
+    <friendlyName>Domoticz Bridge</friendlyName>
+    <manufacturer>logread</manufacturer>
+    <manufacturerURL></manufacturerURL>
+    <modelDescription>Domoticz Bridge for openLuup</modelDescription>
+    <modelName>v0.1</modelName>
+    <modelNumber>1</modelNumber>
+    <handleChildren>1</handleChildren>
+    <Category_Num>1</Category_Num>
+    <UDN></UDN>
+    <serviceList>
+      <service>
+        <serviceType>urn:logread-com:service:DomoticzBridge:1</serviceType>
+        <serviceId>urn:logread-com:serviceId:DomoticzBridge1</serviceId>
+        <SCPDURL>S_DomoticzBridge.xml</SCPDURL>
+      </service>
+    </serviceList>
+		<staticJson>D_DomoticzBridge.json</staticJson>
+    <implementationList>
+      <implementationFile>I_DomoticzBridge.xml</implementationFile>
+    </implementationList>
+  </device>
+</root>

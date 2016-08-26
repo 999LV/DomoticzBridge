@@ -30,3 +30,5 @@ a) on the openLuup system:
 
 b) on the Domoticz system:
 - copy the "script_device_openLuup.lua" from https://github.com/999LV/DomoticzBridge/tree/master/DomoticzScript to the scripts folder of your Domoticz installation (e.g. /home/pi/domoticz/scripts/lua/ on a standard Raspberry Pi install), using your favorite file utility, e.g. WinSCP
+- make sure the Domoticz settings for "local network" include the IP of the openLuup system for password free communication (for now, it is assumed both Domoticz and openLuup are running on either same hardware or LAN, hence no security implemented)
+ 

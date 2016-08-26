@@ -24,6 +24,7 @@ NB. this version ONLY works in openLuup
 	2016-08-21	alpha version 0.08 smoke sensor and tripped info for both smoke and motion sensors
 	2016-08-22	alpha version 0.09 major change to device creation... add all default variables, not just the ones cloned from Domoticz
 	2016-08-26	alpha version 0.10 code optimization and cleanup for Domoticz API calls
+	2016-08-26	alpha version 0.11 WIP: variable change function to address some device actions (e.g. security sensors armed/tripped)
 -]]
 local devNo                      -- our device number
 local DZport	= "8084"	-- default port of the Domoticz server
@@ -156,7 +157,7 @@ local DZ2VeraMap = {
 		device_file = "D_MotionSensor1.xml",
 		states = {
 			{service = "urn:micasaverde-com:serviceId:SecuritySensor1", variable = "Tripped", DZData = "Status", boolean = true},
-			{service = "urn:micasaverde-com:serviceId:SecuritySensor1", variable = "LastTrip", DZData = "LastUpdate", epoch = true},
+--			{service = "urn:micasaverde-com:serviceId:SecuritySensor1", variable = "LastTrip", DZData = "LastUpdate", epoch = true},
 			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
 		},
 		actions = {
@@ -169,7 +170,7 @@ local DZ2VeraMap = {
 		device_file = "D_SmokeSensor1.xml",
 		states = {
 			{service = "urn:micasaverde-com:serviceId:SecuritySensor1", variable = "Tripped", DZData = "Status", boolean = true},
-			{service = "urn:micasaverde-com:serviceId:SecuritySensor1", variable = "LastTrip", DZData = "LastUpdate", epoch = true},
+--			{service = "urn:micasaverde-com:serviceId:SecuritySensor1", variable = "LastTrip", DZData = "LastUpdate", epoch = true},
 			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
 		},
 		actions = {
@@ -201,44 +202,11 @@ local DZ2VeraMap = {
 
 
 local function nicelog(message)
-	local display = "openWeather : %s"
+	local display = "Domoticz Bridge : %s"
 	message = message or ""
 	if type(message) == "table" then message = table.concat(message) end
 	luup.log(string.format(display, message))
 --	print(string.format(display, message))
-end
---[[
-local function log(message)
-	local display = "Domoticz Bridge : %s"
---	print(string.format(display, message or ""))
-	luup.log(string.format(display, message or ""))
-end
---]]
-
-local function pretty(t,indent)
-    local names = {}
-    if not indent then indent = "" end
-    for n,g in pairs(t) do
-        table.insert(names,n)
-    end
---    table.sort(names)
-    for i,n in pairs(names) do
-        local v = t[n]
-        if type(v) == "table" then
-            if(v==t) then -- prevent endless loop if table contains reference to itself
-                nicelog({indent, tostring(n), ": <-"})
-            else
-                nicelog({indent, tostring(n), ":"})
-                pretty(v,indent.."   ")
-            end
-        else
-            if type(v) == "function" then
-                nicelog({indent, tostring(n), "()"})
-            else
-                nicelog({indent, tostring(n), ": ", tostring(v)})
-            end
-        end
-    end
 end
 
 -- shallow-copy a table
@@ -508,14 +476,14 @@ local function DZAPI(APIcall, logmessage)
 		retdata, _ = json.decode(retdata)
 		if retdata.status == "OK" then
 			result = "API responded success"
-			luup.set_failure(0)
+			--luup.set_failure(0)
 		else
 			result = "API responded error !"
-			luup.set_failure(2) -- simulate authentication error to show device in red in the UI (NOT WORKING FOR NOW ???)
+			--luup.set_failure(2) -- simulate authentication error to show device in red in the UI (NOT WORKING FOR NOW ???)
 		end
 	else
 		result = "Network error, Domoticz API not reachable !"
-		luup.set_failure(2) -- simulate authentication error to show device in red in the UI (NOT WORKING FOR NOW ???)
+		--luup.set_failure(2) -- simulate authentication error to show device in red in the UI (NOT WORKING FOR NOW ???)
 	end
 	nicelog({logmessage, " ", result})
 	return retdata
@@ -657,6 +625,31 @@ end
 
 -- POLLING FUNCTIONS FOR VARIABLE UPDATES
 
+-- handles some device specific triggers such as armed sensors
+function updatevar(serviceId, variable, value, devNo)
+
+	-- let's first update the required variable itself
+	setVar (variable, value, serviceId, devNo)
+
+	-- then go for possible associations...
+
+	-- if security sensor trips while it is "Armed", then we need to raise the "ArmedTripped flag",
+	-- but if it untrips, then we kill the "ArmedTripped" flag regarless of the "Armed" status
+	-- we also update the "LastTrip" variable (and the now disregarded by MiOS "LastUnTrip" variable) as Domoticz only give last change timestamp
+	if serviceId == "urn:micasaverde-com:serviceId:SecuritySensor1" and variable == "Tripped" then
+		local ArmedTripped = "0"
+		local Armed = luup.variable_get(serviceId, "Armed", devNo)
+		if tonumber(value) == 1 then -- the sensor tripped
+			setVar("LastTrip", os.time(), serviceId, devNo)
+			if tonumber(Armed) == 1 then ArmedTripped = "1" end
+		else
+			setVar("LastUnTrip", os.time(), serviceId, devNo)
+		end
+		setVar("ArmedTripped", ArmedTripped, serviceId, devNo)
+	end
+end
+
+-- the function handling the polling requests, either for comprehensive or device specific polling
 function polling(deviceidx)
 	nicelog("Begin Domoticz polling !")
 	local IndexedDZData = {}
@@ -667,7 +660,8 @@ function polling(deviceidx)
 		for _, DZv in pairs(DZData) do -- for each device/variable in the table, do scan the DZ Data for matches
 			if DZv.idx == v.idx then
 				tempval = convertvariable(v.variable, DZv[v.DZData], v)
-				if tempval then setVar (v.variable, tempval, v.service, OFFSET + v.idx) end
+				if tempval then updatevar(v.service, v.variable, tempval, OFFSET + v.idx) end
+--									setVar (v.variable, tempval, v.service, OFFSET + v.idx) end
 				break -- avoid checking other devices once we have found a match
 			end
 		end
@@ -675,6 +669,7 @@ function polling(deviceidx)
 	nicelog("Finished Domoticz polling !")
 end
 
+-- the polling loop !
 function pollfullDZData()
 	polling()
 	luup.call_delay("pollfullDZData", POLL_DELAY)
@@ -1041,7 +1036,7 @@ function init (lul_device)
     setVar ("Version", version)
   end
 
-  setVar ("DisplayLine1", Ndev.." devices")
+  setVar ("DisplayLine1", Ndev.." devices", SID.altui)
   setVar ("DisplayLine2", ip, SID.altui)
 
   if Ndev > 0 then

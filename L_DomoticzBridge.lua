@@ -1,6 +1,6 @@
 ABOUT = {
   NAME          = "DomoticzBridge",
-  VERSION       = "2016.08.22",
+  VERSION       = "2016.08.26",
   DESCRIPTION   = "DomoticzBridge plugin for openLuup, based on VeraBridge",
   AUTHOR        = "@logread, based on code from @akbooer",
   COPYRIGHT     = "(c) 2016 logread",
@@ -23,6 +23,7 @@ NB. this version ONLY works in openLuup
 	2016-08-21	alpha version 0.07 improved actions code - dimmer device and PushOnButton bugs corrected
 	2016-08-21	alpha version 0.08 smoke sensor and tripped info for both smoke and motion sensors
 	2016-08-22	alpha version 0.09 major change to device creation... add all default variables, not just the ones cloned from Domoticz
+	2016-08-26	alpha version 0.10 code optimization and cleanup for Domoticz API calls
 -]]
 local devNo                      -- our device number
 local DZport	= "8084"	-- default port of the Domoticz server
@@ -71,13 +72,148 @@ local HouseModeOptions = {      -- 2016.05.23
 
 local ZWaveOnly, Included, Excluded
 
+--[[ 	the DZ2VeraMap allows matching a given (known) Domoticz device type/subtype with the closest possible device type in openLuup.
+		the device_file key is used to create the relevant device (a call to openLuup's loader module gathers the other required data);
+		the states table is mapping the Domoticz variables to the appropriate openLuup ones. For now, there is no attempt to create/use
+		any other services/variables than the ones in this table
+--]]
+local DZ2VeraMap = {
+	Temp = {
+		device_file = "D_TemperatureSensor1.xml",
+		states = {
+			{service = "urn:upnp-org:serviceId:TemperatureSensor1", variable = "CurrentTemperature", DZData = "Temp"},
+			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
+		},
+		actions = {
+			{service = "urn:upnp-org:serviceId:TemperatureSensor1",
+			action = "SetVariable", name = "CurrentTemperature",
+			command = "udevice&idx=%d&nvalue=0&svalue=%d" }
+		}
+	},
+	Humidity = {
+		device_file = "D_HumiditySensor1.xml",
+		states = {
+			{service = "urn:micasaverde-com:serviceId:HumiditySensor1", variable = "CurrentLevel", DZData = "Humidity"},
+			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
+		},
+		actions = {
+			{service = "urn:micasaverde-com:serviceId:HumiditySensor1",
+			action = "SetVariable", name = "CurrentLevel",
+			command = "udevice&idx=%d&nvalue=%d&svalue=0"} -- need to be tested... nvalue with % or not ? svalue can be "" ?
+		}
+	},
+	TempHumidityBaro = { -- original data = "Temp + Humidity + Baro"
+		device_file = "D_ComboDevice1.xml",
+		states = {
+			{service = "urn:upnp-org:serviceId:TemperatureSensor1", variable = "CurrentTemperature", DZData = "Temp"},
+			{service = "urn:micasaverde-com:serviceId:HumiditySensor1", variable = "CurrentLevel", DZData = "Humidity"},
+			{service = "urn:upnp-org:serviceId:altui1", variable = "DisplayLine1", DZData = "Data"},
+			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
+		}
+	},
+	SwitchOnOff = { -- original data = "Light/Switch", with SubType to be refined
+		device_file = "D_BinaryLight1.xml",
+		states = {
+			{service = "urn:upnp-org:serviceId:SwitchPower1", variable = "Status", DZData = "Status", boolean = true},
+--			{service = "urn:upnp-org:serviceId:SwitchPower1", variable = "Target", DZData = "Status", boolean = true},
+			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
+		},
+		actions = {
+			{service = "urn:upnp-org:serviceId:SwitchPower1",
+			action = "SetTarget", name = "newTargetValue",
+			command = "switchlight&idx=%d&switchcmd=%s", boolean = true}
+		}
+	},
+	PushOnButton = { -- original data = "Lighting 2", with SubType = "AC" and SwitchType = "Push On Button"
+		device_file = "D_BinaryLight1.xml",
+		states = {
+			{service = "urn:upnp-org:serviceId:SwitchPower1", variable = "Status", DZData = "Data", boolean = true},
+			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
+		},
+		actions = {
+			{service = "urn:upnp-org:serviceId:SwitchPower1",
+			action = "SetTarget", name = "newTargetValue",
+			command = "switchlight&idx=%d&switchcmd=%s", boolean = true}
+		}
+	},
+	Dimmer = { -- original data = ""Light/Switch", with SubType = "Selector Switch" and SwitchType = "Dimmer"
+		device_file = "D_DimmableLight1.xml",
+		states = {
+			{service = "urn:upnp-org:serviceId:Dimming1", variable = "LoadLevelStatus", DZData = "Level"},
+			{service = "urn:upnp-org:serviceId:SwitchPower1", variable = "Status", DZData = "Status", boolean = true},
+			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
+		},
+		actions = {
+			{service = "urn:upnp-org:serviceId:Dimming1",
+			action = "SetLoadLevelTarget", name = "newLoadlevelTarget",
+			command = "switchlight&idx=%d&switchcmd=Set%%20Level&level=%d"},
+			{service = "urn:upnp-org:serviceId:SwitchPower1",
+			action = "SetTarget", name = "newTargetValue",
+			command = "switchlight&idx=%d&switchcmd=%s", boolean = true}
+		}
+	},
+	MotionSensor = { -- original Type = "Light/Switch" with SubType = "Switch" and SwitchType = "Motion Sensor"
+		device_file = "D_MotionSensor1.xml",
+		states = {
+			{service = "urn:micasaverde-com:serviceId:SecuritySensor1", variable = "Tripped", DZData = "Status", boolean = true},
+			{service = "urn:micasaverde-com:serviceId:SecuritySensor1", variable = "LastTrip", DZData = "LastUpdate", epoch = true},
+			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
+		},
+		actions = {
+			{service = "urn:micasaverde-com:serviceId:SecuritySensor1",
+			action = "SetArmed", name = "newArmedValue",
+			command = "Armed", self = true}
+		}
+	},
+	SmokeDetector = { -- original Type = "Light/Switch" with SubType = "Switch" and SwitchType = "Smoke Detector"
+		device_file = "D_SmokeSensor1.xml",
+		states = {
+			{service = "urn:micasaverde-com:serviceId:SecuritySensor1", variable = "Tripped", DZData = "Status", boolean = true},
+			{service = "urn:micasaverde-com:serviceId:SecuritySensor1", variable = "LastTrip", DZData = "LastUpdate", epoch = true},
+			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
+		},
+		actions = {
+			{service = "urn:micasaverde-com:serviceId:SecuritySensor1",
+			action = "SetArmed", name = "newArmedValue",
+			command = "Armed", self = true}
+		}
+	},
+	Lux = {
+		device_file = "D_LightSensor1.xml",
+		states = {
+			{service = "urn:micasaverde-com:serviceId:LightSensor1", variable = "CurrentLevel", DZData = "Data", pattern = "[^%d]"},
+			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
+		}
+	},
+	Generic = {
+		device_file = "D_GenericSensor1.xml",
+		states = {
+			{service = "urn:micasaverde-com:serviceId:GenericSensor1", variable = "CurrentLevel", DZData = "Data"},
+			{service = "urn:upnp-org:serviceId:altui1", variable = "DisplayLine1", DZData = "Data"},
+			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
+		}
+	}
+}
+--------------------------------------------------------------------------------------------------
+
+
 -- Logread's utility functions
 
+
+local function nicelog(message)
+	local display = "openWeather : %s"
+	message = message or ""
+	if type(message) == "table" then message = table.concat(message) end
+	luup.log(string.format(display, message))
+--	print(string.format(display, message))
+end
+--[[
 local function log(message)
 	local display = "Domoticz Bridge : %s"
 --	print(string.format(display, message or ""))
 	luup.log(string.format(display, message or ""))
 end
+--]]
 
 local function pretty(t,indent)
     local names = {}
@@ -90,16 +226,16 @@ local function pretty(t,indent)
         local v = t[n]
         if type(v) == "table" then
             if(v==t) then -- prevent endless loop if table contains reference to itself
-                log(indent..tostring(n)..": <-")
+                nicelog({indent, tostring(n), ": <-"})
             else
-                log(indent..tostring(n)..":")
+                nicelog({indent, tostring(n), ":"})
                 pretty(v,indent.."   ")
             end
         else
             if type(v) == "function" then
-                log(indent..tostring(n).."()")
+                nicelog({indent, tostring(n), "()"})
             else
-                log(indent..tostring(n)..": "..tostring(v))
+                nicelog({indent, tostring(n), ": ", tostring(v)})
             end
         end
     end
@@ -335,138 +471,16 @@ end
 	**************************************************************************************************************************
 --]]
 
---[[ 	the DZ2VeraMap allows matching a given (known) Domoticz device type/subtype with the closest possible device type in openLuup.
-		the device_file key is used to create the relevant device (a call to openLuup's loader module gathers the other required data);
-		the states table is mapping the Domoticz variables to the appropriate openLuup ones. For now, there is no attempt to create/use
-		any other services/variables than the ones in this table
---]]
-local DZ2VeraMap = {
-	Temp = {
-		device_file = "D_TemperatureSensor1.xml",
-		states = {
-			{service = "urn:upnp-org:serviceId:TemperatureSensor1", variable = "CurrentTemperature", DZData = "Temp"},
-			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
-		},
-		actions = {
-			{service = "urn:upnp-org:serviceId:TemperatureSensor1",
-			action = "SetVariable", name = "CurrentTemperature",
-			command = "udevice&idx=%d&nvalue=0&svalue=%d" }
-		}
-	},
-	Humidity = {
-		device_file = "D_HumiditySensor1.xml",
-		states = {
-			{service = "urn:micasaverde-com:serviceId:HumiditySensor1", variable = "CurrentLevel", DZData = "Humidity"},
-			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
-		},
-		actions = {
-			{service = "urn:micasaverde-com:serviceId:HumiditySensor1",
-			action = "SetVariable", name = "CurrentLevel",
-			command = "udevice&idx=%d&nvalue=%d&svalue=0"} -- need to be tested... nvalue with % or not ? svalue can be "" ?
-		}
-	},
-	TempHumidityBaro = { -- original data = "Temp + Humidity + Baro"
-		device_file = "D_ComboDevice1.xml",
-		states = {
-			{service = "urn:upnp-org:serviceId:TemperatureSensor1", variable = "CurrentTemperature", DZData = "Temp"},
-			{service = "urn:micasaverde-com:serviceId:HumiditySensor1", variable = "CurrentLevel", DZData = "Humidity"},
-			{service = "urn:upnp-org:serviceId:altui1", variable = "DisplayLine1", DZData = "Data"},
-			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
-		}
-	},
-	SwitchOnOff = { -- original data = "Light/Switch", with SubType to be refined
-		device_file = "D_BinaryLight1.xml",
-		states = {
-			{service = "urn:upnp-org:serviceId:SwitchPower1", variable = "Status", DZData = "Status", boolean = true},
---			{service = "urn:upnp-org:serviceId:SwitchPower1", variable = "Target", DZData = "Status", boolean = true},
-			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
-		},
-		actions = {
-			{service = "urn:upnp-org:serviceId:SwitchPower1",
-			action = "SetTarget", name = "newTargetValue",
-			command = "switchlight&idx=%d&switchcmd=%s", boolean = true}
-		}
-	},
-	PushOnButton = { -- original data = "Lighting 2", with SubType = "AC" and SwitchType = "Push On Button"
-		device_file = "D_BinaryLight1.xml",
-		states = {
-			{service = "urn:upnp-org:serviceId:SwitchPower1", variable = "Status", DZData = "Data", boolean = true},
-			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
-		},
-		actions = {
-			{service = "urn:upnp-org:serviceId:SwitchPower1",
-			action = "SetTarget", name = "newTargetValue",
-			command = "switchlight&idx=%d&switchcmd=%s", boolean = true}
-		}
-	},
-	Dimmer = { -- original data = ""Light/Switch", with SubType = "Selector Switch" and SwitchType = "Dimmer"
-		device_file = "D_DimmableLight1.xml",
-		states = {
-			{service = "urn:upnp-org:serviceId:Dimming1", variable = "LoadLevelStatus", DZData = "Level"},
-			{service = "urn:upnp-org:serviceId:SwitchPower1", variable = "Status", DZData = "Status", boolean = true},
-			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
-		},
-		actions = {
-			{service = "urn:upnp-org:serviceId:Dimming1",
-			action = "SetLoadLevelTarget", name = "newLoadlevelTarget",
-			command = "switchlight&idx=%d&switchcmd=Set%%20Level&level=%d"},
-			{service = "urn:upnp-org:serviceId:SwitchPower1",
-			action = "SetTarget", name = "newTargetValue",
-			command = "switchlight&idx=%d&switchcmd=%s", boolean = true}
-		}
-	},
-	MotionSensor = { -- original Type = "Light/Switch" with SubType = "Switch" and SwitchType = "Motion Sensor"
-		device_file = "D_MotionSensor1.xml",
-		states = {
-			{service = "urn:micasaverde-com:serviceId:SecuritySensor1", variable = "Tripped", DZData = "Status", boolean = true},
-			{service = "urn:micasaverde-com:serviceId:SecuritySensor1", variable = "LastTrip", DZData = "LastUpdate", epoch = true},
-			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
-		},
-		actions = {
-			{service = "urn:micasaverde-com:serviceId:SecuritySensor1",
-			action = "SetArmed", name = "newArmedValue",
-			command = "Armed", self = true}
-		}
-	},
-	SmokeDetector = { -- original Type = "Light/Switch" with SubType = "Switch" and SwitchType = "Smoke Detector"
-		device_file = "D_SmokeSensor1.xml",
-		states = {
-			{service = "urn:micasaverde-com:serviceId:SecuritySensor1", variable = "Tripped", DZData = "Status", boolean = true},
-			{service = "urn:micasaverde-com:serviceId:SecuritySensor1", variable = "LastTrip", DZData = "LastUpdate", epoch = true},
-			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
-		},
-		actions = {
-			{service = "urn:micasaverde-com:serviceId:SecuritySensor1",
-			action = "SetArmed", name = "newArmedValue",
-			command = "Armed", self = true}
-		}
-	},
-	Lux = {
-		device_file = "D_LightSensor1.xml",
-		states = {
-			{service = "urn:micasaverde-com:serviceId:LightSensor1", variable = "CurrentLevel", DZData = "Data", pattern = "[^%d]"},
-			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
-		}
-	},
-	Generic = {
-		device_file = "D_GenericSensor1.xml",
-		states = {
-			{service = "urn:micasaverde-com:serviceId:GenericSensor1", variable = "CurrentLevel", DZData = "Data"},
-			{service = "urn:upnp-org:serviceId:altui1", variable = "DisplayLine1", DZData = "Data"},
-			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
-		}
-	}
-}
---------------------------------------------------------------------------------------------------
-
 -- FUNCTIONS TO EXTRACT DATA FROM DOMOTICZ AND CONVERT INTO A SYNTHETIC OPENLUUP USER_DATA CONTEXT
 
  -- deals with the messy device types that exist in Domoticz and put some consistency for device type lookup
 local function devicetypeconvert(DZType, DZSubType, DZSwitchType)
+
 	local function cleanstring(originalstring)
 		originalstring = originalstring or ""
 		return string.gsub(originalstring, "[% %/%c%+]", "") -- clean DZ device type from spaces, slashes and any control char
 	end
+
 	DZType = cleanstring(DZType or "")
 	if string.match(DZType, "Switch") or string.match(DZType, "Light") then -- this is a switch or light and we need to look at SubType / SwitchType (Domoticz is messy there...)
 		local DZSubType = cleanstring(DZSubType)
@@ -484,23 +498,15 @@ local function devicetypeconvert(DZType, DZSubType, DZSwitchType)
 	return DZType
 end
 
--- this is the actional reading of Domoticz's API... used for building user_data and for subsequent variables polling
-local function GetDZData(deviceidx)
-	local DZData = {}
-	local APIcall = ""
-	if deviceidx then
-		APIcall = "/json.htm?type=devices&rid=" .. tostring(deviceidx or "")
-	else
-		APIcall = "/json.htm?type=devices&filter=all&used=true&order=Name"
-	end
+-- generic call to Domoticz's API, used for polling and/or actions
+local function DZAPI(APIcall, logmessage)
 	APIcall = table.concat{"http://", ip, ":", DZport, APIcall}
-	log(APIcall)
-	local message = "device(s) polling call to Domoticz: %s"
+	nicelog(APIcall)
 	local result = ""
 	local retdata, retcode = http.request(APIcall)
-	DZData, _ = json.decode(retdata)
 	if retcode == 200 then
-		if DZData.status == "OK" then
+		retdata, _ = json.decode(retdata)
+		if retdata.status == "OK" then
 			result = "API responded success"
 			luup.set_failure(0)
 		else
@@ -508,10 +514,26 @@ local function GetDZData(deviceidx)
 			luup.set_failure(2) -- simulate authentication error to show device in red in the UI (NOT WORKING FOR NOW ???)
 		end
 	else
-		result = "Domoticz did not respond ! bad call or server down"
+		result = "Network error, Domoticz API not reachable !"
 		luup.set_failure(2) -- simulate authentication error to show device in red in the UI (NOT WORKING FOR NOW ???)
 	end
-	log(message:format(result))
+	nicelog({logmessage, " ", result})
+	return retdata
+end
+
+-- this is the reading of Domoticz's API... used for building user_data and for subsequent variables polling
+local function GetDZData(deviceidx)
+	local DZData = {}
+	local APIcall = ""
+
+	if deviceidx then
+		APIcall = "/json.htm?type=devices&rid=" .. tostring(deviceidx or "")
+	else
+		APIcall = "/json.htm?type=devices&filter=all&used=true&order=Name"
+	end
+
+	DZData = DZAPI(APIcall, "device(s) polling call to Domoticz:")
+
 	return DZData.result, DZData.ActTime -- returns a table with the devices data and the timestamp of the data
 end
 
@@ -530,6 +552,7 @@ end
 
 -- add to each device as extracted from Domoticz the relevant "vera-like" attributes and variables
 local function BuildDevice(device, context)
+
 	local function BuildVariable(service, variable, value, id)
 		local state = {}
 		state.service = service or ""
@@ -538,6 +561,7 @@ local function BuildDevice(device, context)
 		state.id = id
 		return state
 	end
+
 	local function getdefaultvariables(services)
 		local variables = {}
 		local parameter = "%s,%s=%s"
@@ -548,7 +572,7 @@ local function BuildDevice(device, context)
 					for _,v in ipairs (svc.variables or {}) do
 						local default = v.defaultValue
 						if default and default ~= '' then            -- only variables with defaults
---							log(parameter: format (service.serviceId, v.name, default))
+--							nicelog(parameter: format (service.serviceId, v.name, default))
 							local index = table.concat{service.serviceId, ".", v.name}
 							variables[index] = {service = service.serviceId, variable = v.name, value = default}
 						end
@@ -558,14 +582,17 @@ local function BuildDevice(device, context)
 		end
 		return variables
 	end
+
 	local DZType = devicetypeconvert(context.Type, context.SubType, context.SwitchType)
-	log(table.concat{"Processing original device ", device.id, " ", device.name, " of type '", device.DZType, "' as '", DZType, "'"})
+	nicelog({"Processing original device ", device.id, " ", device.name, " of type '", device.DZType, "' as '", DZType, "'"})
+
 	-- process to add the "vera-like" serviceIds and variables
 	device.device_file = DZ2VeraMap[DZType].device_file
 	local loaderdevice = loader.read_device(device.device_file)
 	device.device_type = loaderdevice.device_type
 	device.device_json = loaderdevice.json_file
 	device.states = {} -- the device variables
+
 	-- initialize required device variables
 	local defaultvariables = getdefaultvariables(loaderdevice.service_list)  -- use the openluup loader read_service function to initialize all default variables
 	local state
@@ -583,11 +610,14 @@ local function BuildDevice(device, context)
 			table.insert(pollmap, tmap) -- pollmap is used in the polling loop to match Domoticz variables with openLuup's
 		end
 	end
-	for _, variable in pairs(defaultvariables) do -- create the luup default variables not mapped by the bridge
+
+	-- create the luup default variables not mapped by the bridge
+	for _, variable in pairs(defaultvariables) do
 		if not variable.created then
 			table.insert(device.states, BuildVariable(variable.service, variable.variable, variable.value, #device.states+1))
 		end
 	end
+
 	-- initialize actions to be handled for this device
 	if DZ2VeraMap[DZType].actions then
 		for _, action in pairs(DZ2VeraMap[DZType].actions) do
@@ -596,6 +626,7 @@ local function BuildDevice(device, context)
 			table.insert(actionmap, actiontable) -- actionmap is used to match Domoticz actions with openLuup actions
 		end
 	end
+
 	return device
 end
 
@@ -627,7 +658,7 @@ end
 -- POLLING FUNCTIONS FOR VARIABLE UPDATES
 
 function polling(deviceidx)
-	log("Begin Domoticz polling !")
+	nicelog("Begin Domoticz polling !")
 	local IndexedDZData = {}
 	local tempval
 	local DZData, timestamp = GetDZData(deviceidx)
@@ -641,7 +672,7 @@ function polling(deviceidx)
 			end
 		end
 	end
-	log("Finished Domoticz polling !")
+	nicelog("Finished Domoticz polling !")
 end
 
 function pollfullDZData()
@@ -657,8 +688,8 @@ function DZData_update(lul_request, lul_parameters, lul_outputformat)
 	local err = true
 	for key, value in pairs(lul_parameters) do
 		if key == "idx" then
-			for idx in value:gmatch "%d+" do
-				log("Received change notification from Domoticz - Device = " .. (idx or ""))
+			for idx in value:gmatch "%d+" do -- loop each idx received in CSV string format... actually it seems that only one idx at a time is ever received ?
+				nicelog({"Received change notification from Domoticz - Device = ", idx or ""})
 				if tonumber(idx) ~= 0 then
 					err = false
 					polling(idx)
@@ -688,7 +719,7 @@ local function GetUserData ()
   if Domoticz then
     luup.log "Domoticz info needed to build bridge environment received!"
     if Domoticz.devices then
-      local new_room_name = "Domoticz" --DEV "MiOS-" .. (Domoticz.PK_AccessPoint: gsub ("%c",''))  -- stray control chars removed!!
+      local new_room_name = "Domoticz"
       luup.log (new_room_name)
       rooms.create (new_room_name)
 
@@ -714,55 +745,44 @@ end
 -- called with serviceId and name of undefined action
 -- returns action tag object with possible run/job/incoming/timeout functions
 local function generic_action (serviceId, name)
+
 	local function job (lul_device, lul_settings)
 		local devNo = remote_by_local_id (lul_device)
 		if not devNo then return end        -- not a device we have cloned
 		local matchfound = false
-		local message = "Action table match scan: %s - %s - %s"
+		local message = "Action table match: %s - %s - %s"
 		for _, action in pairs(actionmap) do
 			if action.idx == tostring(devNo) and action.service == lul_settings.serviceId and action.action == lul_settings.action then
 				matchfound = true
-				log(message:format(tostring(devNo), tostring(lul_settings.serviceId), tostring(lul_settings.action)))
-				local APIcall = table.concat{"http://", ip, ":", DZport, "/json.htm?type=command&param="}
+				nicelog(message:format(tostring(devNo), tostring(lul_settings.serviceId), tostring(lul_settings.action)))
+				local APIcall = "/json.htm?type=command&param="
 				local value = lul_settings[action.name]
+
 				if action.boolean then
 					if tonumber(value) > 0 then value = "On" else value = "Off" end
 				end
+
 				if action.self then -- this is an action for a local variable within the openLuup device
 					luup.variable_set(action.service, action.command, value, OFFSET + tonumber(action.idx))
 				else -- this is an action for Domoticz
 					APIcall = table.concat{APIcall, string.format(action.command, devNo, value)}
-					log(APIcall)
-					local message = "Action handler call to Domoticz: %s"
-					local result = ""
-					local retdata, retcode = http.request(APIcall)
-					retdata, _ = json.decode(retdata)
-					if retcode == 200 then
-						if retdata.status == "OK" then
-							result = "API responded success"
-							luup.set_failure(0)
-						else
-							result = "API responded error !"
-							luup.set_failure(2) -- simulate authentication error to show device in red in the UI -- NOT WORKING
-						end
-					else
-						result = "Domoticz did not respond ! bad call or server down"
-						luup.set_failure(2) -- simulate authentication error to show device in red in the UI -- NOT WORKING
-					end
-					log(message:format(result))
+					DZAPI(APIcall, "Action handler call to Domoticz:")
 				end
+
 				break -- we can stop here as we finished the action conversion
 			end
 		end
+
 		if matchfound then
 			return 4, 0
 		else
 			local message = "service/action not implemented: %d.%s.%s"
-			log (message: format (lul_device, lul_settings.serviceId, lul_settings.action))
+			nicelog(message: format (lul_device, lul_settings.serviceId, lul_settings.action))
 			return 2, 0
 		end
 	end
-  return {run = job}
+
+	return {run = job}
 end
 
 --[[
@@ -770,30 +790,7 @@ end
 	*                    THIS SECTION HOLDS MOSTLY UNCHANGED ORIGINAL VERA BRIDGE FUNCTIONS                                  *
 	**************************************************************************************************************************
 --]]
---[[
--- MONITOR variables
 
--- updates existing device variables with new values
--- this devices table is from the "status" request
-local function UpdateVariables(devices)
-  for _, dev in pairs (devices) do
-  dev.id = tonumber (dev.id)
-    local i = local_by_remote_id(dev.id)
-    local device = i and luup.devices[i]
-    if device and (type (dev.states) == "table") then
-      device: status_set (dev.status)      -- 2016.04.29 set the overall device status
-      for _, v in ipairs (dev.states) do
---        setVar (v.variable, v.service, v.value, i)    -- only actually changes if it's different from current value
-        local value = luup.variable_get (v.service, v.variable, i)
-        if v.value ~= value then
---          print ("update", dev.id, i, v.variable)    -- TODO: TEST ONLY
-          luup.variable_set (v.service, v.variable, v.value, i)
-        end
-      end
-    end
-  end
-end
---]]
 -- update HouseMode variable and, possibly, the actual openLuup Mode
 local function UpdateHouseMode (Mode)
   Mode = tostring(Mode)

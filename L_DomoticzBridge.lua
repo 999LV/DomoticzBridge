@@ -1,10 +1,10 @@
 ABOUT = {
   NAME          = "DomoticzBridge",
-  VERSION       = "2016.08.26",
+  VERSION       = "2016.08.31",
   DESCRIPTION   = "DomoticzBridge plugin for openLuup, based on VeraBridge",
   AUTHOR        = "@logread, based on code from @akbooer",
   COPYRIGHT     = "(c) 2016 logread",
-  DOCUMENTATION = "https://github.com/akbooer/openLuup/tree/master/Documentation",
+  DOCUMENTATION = "https://github.com/999LV/DomoticzBridge/blob/master/README.md",
 }
 --[[
 
@@ -25,6 +25,17 @@ NB. this version ONLY works in openLuup
 	2016-08-22	alpha version 0.09 major change to device creation... add all default variables, not just the ones cloned from Domoticz
 	2016-08-26	alpha version 0.10 code optimization and cleanup for Domoticz API calls
 	2016-08-26	alpha version 0.11 WIP: variable change function to address some device actions (e.g. security sensors armed/tripped)
+	2016-08-31	alpha version 0.12 first public release on Alt App Store
+
+This program is free software: you can redistribute it and/or modify
+it under the condition that it is for private or home useage and
+this whole comment is reproduced in the source code file.
+Commercial utilisation is not authorized without the appropriate
+written agreement from "logread", contact by PM on http://forum.micasaverde.com/
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
 -]]
 local devNo                      -- our device number
 local DZport	= "8084"	-- default port of the Domoticz server
@@ -151,6 +162,25 @@ local DZ2VeraMap = {
 			{service = "urn:upnp-org:serviceId:SwitchPower1",
 			action = "SetTarget", name = "newTargetValue",
 			command = "switchlight&idx=%d&switchcmd=%s", boolean = true}
+		}
+	},
+	Blinds = { -- original data = ""Light/Switch", with SubType = "Switch" and SwitchType includes "Blinds"
+		device_file = "D_WindowCovering1.xml",
+		states = {
+			{service = "urn:upnp-org:serviceId:SwitchPower1", variable = "Status", DZData = "Status", boolean = true},
+			{service = "urn:upnp-org:serviceId:Dimming1", variable = "LoadLevelStatus", DZData = "Level"},
+			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
+		},
+		actions = {
+			{service = "urn:upnp-org:serviceId:Dimming1",
+			action = "SetLoadLevelTarget", name = "newLoadlevelTarget",
+			command = "switchlight&idx=%d&switchcmd=%s", boolean = true, inverted = true}, -- &level=0
+--			{service = "urn:upnp-org:serviceId:Dimming1",
+--			action = "SetLoadLevelTarget", name = "newLoadlevelTarget",
+--			command = "switchlight&idx=%d&switchcmd=Set%%20Level&level=%d"},
+			{service = "urn:upnp-org:serviceId:WindowCovering1",
+			action = "Stop", name = "",
+			command = "switchlight&idx=%d&switchcmd=Stop"} -- &level=0
 		}
 	},
 	MotionSensor = { -- original Type = "Light/Switch" with SubType = "Switch" and SwitchType = "Motion Sensor"
@@ -459,7 +489,11 @@ local function devicetypeconvert(DZType, DZSubType, DZSwitchType)
 					DZSwitchType == "PushOnButton" or
 					DZSwitchType == "Dimmer"
 			then	DZType = DZSwitchType
-			else	DZType = "SwitchOnOff" end -- default if no specific switch type
+			elseif
+					string.match(DZSwitchType, "Blinds") then DZType = "Blinds"
+			else
+					DZType = "SwitchOnOff" -- default if no specific switch type
+			end
 		end
 	end
 	if not DZ2VeraMap[DZType] then DZType = "Generic" end -- no match with list of specific known "vera like" devices
@@ -508,7 +542,7 @@ end
 -- dealing with the fact that Domoticz variables can have very different formats compared to openLuup
 local function convertvariable(variable, value, format_table)
 	local tempval = nil
-	if not(variable == "BatteryLevel" and value == 255) then -- if BatteryLevel = 255 then it is not a battery device
+	if not(variable == "BatteryLevel" and value == 255) then -- if BatteryLevel = 255 then it is not a battery device and we discard that variable
 		tempval = tostring(value)
 		if format_table.pattern then tempval = string.gsub(tempval, format_table.pattern, "") end
 		if format_table.epoch then tempval = datetoepoch(tempval) end
@@ -530,6 +564,7 @@ local function BuildDevice(device, context)
 		return state
 	end
 
+	-- read the "Vera" device definition files to populate the default services/variables - thanks @akbooer !
 	local function getdefaultvariables(services)
 		local variables = {}
 		local parameter = "%s,%s=%s"
@@ -540,7 +575,6 @@ local function BuildDevice(device, context)
 					for _,v in ipairs (svc.variables or {}) do
 						local default = v.defaultValue
 						if default and default ~= '' then            -- only variables with defaults
---							nicelog(parameter: format (service.serviceId, v.name, default))
 							local index = table.concat{service.serviceId, ".", v.name}
 							variables[index] = {service = service.serviceId, variable = v.name, value = default}
 						end
@@ -647,6 +681,9 @@ function updatevar(serviceId, variable, value, devNo)
 		end
 		setVar("ArmedTripped", ArmedTripped, serviceId, devNo)
 	end
+
+	-- this requires some work to handle complex devices in the future
+
 end
 
 -- the function handling the polling requests, either for comprehensive or device specific polling
@@ -661,7 +698,6 @@ function polling(deviceidx)
 			if DZv.idx == v.idx then
 				tempval = convertvariable(v.variable, DZv[v.DZData], v)
 				if tempval then updatevar(v.service, v.variable, tempval, OFFSET + v.idx) end
---									setVar (v.variable, tempval, v.service, OFFSET + v.idx) end
 				break -- avoid checking other devices once we have found a match
 			end
 		end
@@ -754,7 +790,9 @@ local function generic_action (serviceId, name)
 				local value = lul_settings[action.name]
 
 				if action.boolean then
-					if tonumber(value) > 0 then value = "On" else value = "Off" end
+					local test = tonumber(value) > 0
+					if action.inverted then test = not test end -- Domoticz treats blinds in inverted manner for commands (on = closed)
+					if test then value = "On" else value = "Off" end
 				end
 
 				if action.self then -- this is an action for a local variable within the openLuup device
@@ -763,7 +801,6 @@ local function generic_action (serviceId, name)
 					APIcall = table.concat{APIcall, string.format(action.command, devNo, value)}
 					DZAPI(APIcall, "Action handler call to Domoticz:")
 				end
-
 				break -- we can stop here as we finished the action conversion
 			end
 		end

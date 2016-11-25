@@ -1,6 +1,6 @@
 ABOUT = {
   NAME          = "DomoticzBridge",
-  VERSION       = "2016.08.31",
+  VERSION       = "0.13",
   DESCRIPTION   = "DomoticzBridge plugin for openLuup, based on VeraBridge",
   AUTHOR        = "@logread, based on code from @akbooer",
   COPYRIGHT     = "(c) 2016 logread",
@@ -26,6 +26,7 @@ NB. this version ONLY works in openLuup
 	2016-08-26	alpha version 0.10 code optimization and cleanup for Domoticz API calls
 	2016-08-26	alpha version 0.11 WIP: variable change function to address some device actions (e.g. security sensors armed/tripped)
 	2016-08-31	alpha version 0.12 first public release on Alt App Store
+  2016-11-24  beta version 0.13 - bug fix for dimmers/blinds level
 
 This program is free software: you can redistribute it and/or modify
 it under the condition that it is for private or home useage and
@@ -151,7 +152,8 @@ local DZ2VeraMap = {
 	Dimmer = { -- original data = ""Light/Switch", with SubType = "Selector Switch" and SwitchType = "Dimmer"
 		device_file = "D_DimmableLight1.xml",
 		states = {
-			{service = "urn:upnp-org:serviceId:Dimming1", variable = "LoadLevelStatus", DZData = "Level"},
+      {service = "urn:upnp-org:serviceId:Dimming1", variable = "LoadLevelTarget", DZData = "Level"},
+      {service = "urn:upnp-org:serviceId:Dimming1", variable = "LoadLevelStatus", DZData = "Level"},
 			{service = "urn:upnp-org:serviceId:SwitchPower1", variable = "Status", DZData = "Status", boolean = true},
 			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
 		},
@@ -169,6 +171,7 @@ local DZ2VeraMap = {
 		states = {
 			{service = "urn:upnp-org:serviceId:SwitchPower1", variable = "Status", DZData = "Status", boolean = true},
 			{service = "urn:upnp-org:serviceId:Dimming1", variable = "LoadLevelStatus", DZData = "Level"},
+      {service = "urn:upnp-org:serviceId:Dimming1", variable = "LoadLevelTarget", DZData = "Level"},
 			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
 		},
 		actions = {
@@ -720,7 +723,7 @@ function DZData_update(lul_request, lul_parameters, lul_outputformat)
 	for key, value in pairs(lul_parameters) do
 		if key == "idx" then
 			for idx in value:gmatch "%d+" do -- loop each idx received in CSV string format... actually it seems that only one idx at a time is ever received ?
-				nicelog({"Received change notification from Domoticz - Device = ", idx or ""})
+				nicelog({"Received change notification from Domoticz - Device = ", idx or ""}) 
 				if tonumber(idx) ~= 0 then
 					err = false
 					polling(idx)
@@ -1068,9 +1071,10 @@ function init (lul_device)
   Ndev, BuildVersion = GetUserData ()
 
   do -- version number
-    local y,m,d = ABOUT.VERSION:match "(%d+)%D+(%d+)%D+(%d+)"
-    local version = ("v%d.%d.%d"): format (y%2000,m,d)
-    setVar ("Version", version)
+    --local y,m,d = ABOUT.VERSION:match "(%d+)%D+(%d+)%D+(%d+)"
+    --local version = ("v%d.%d.%d"): format (y%2000,m,d)
+    --setVar ("Version", version)
+    setVar ("Version", ABOUT.VERSION)
   end
 
   setVar ("DisplayLine1", Ndev.." devices", SID.altui)

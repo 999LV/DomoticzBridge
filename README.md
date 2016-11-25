@@ -1,7 +1,7 @@
 # DomoticzBridge
 Domoticz Bridge plug-in for openLuup
 
-IMPORTANT: This is Alpha software... in early testing stages and any use is at your own risk !!! This is software for technically savy users at this stage and not supported except by my goodwill...
+IMPORTANT: This is beta software... use is at your own risk !!! This is software for technically savy users at this stage and not supported except by my goodwill...
 
 What this is: a way to drive a Domoticz home automation setup from an openLuup environment
 

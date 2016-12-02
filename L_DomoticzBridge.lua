@@ -1,6 +1,6 @@
 ABOUT = {
   NAME          = "DomoticzBridge",
-  VERSION       = "0.13",
+  VERSION       = "0.14",
   DESCRIPTION   = "DomoticzBridge plugin for openLuup, based on VeraBridge",
   AUTHOR        = "@logread, based on code from @akbooer",
   COPYRIGHT     = "(c) 2016 logread",
@@ -27,6 +27,7 @@ NB. this version ONLY works in openLuup
 	2016-08-26	alpha version 0.11 WIP: variable change function to address some device actions (e.g. security sensors armed/tripped)
 	2016-08-31	alpha version 0.12 first public release on Alt App Store
   2016-11-24  beta version 0.13 - bug fix for dimmers/blinds level
+  2016-11-28  beta version 0.14 - added support for power meters
 
 This program is free software: you can redistribute it and/or modify
 it under the condition that it is for private or home useage and
@@ -219,6 +220,21 @@ local DZ2VeraMap = {
 			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
 		}
 	},
+  ElectricMeter = { -- original Type = "General" with SubType = "kWh"
+		device_file = "D_PowerMeter1.xml",
+		states = {
+			{service = "urn:micasaverde-com:serviceId:EnergyMetering1", variable = "Watts", DZData = "Usage", pattern = " Watt"},
+			{service = "urn:micasaverde-com:serviceId:EnergyMetering1", variable = "KWH", DZData = "Data", pattern = " kWh"},
+			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
+		}
+	},
+  ElectricUsage = { -- original Type = "Usage" with SubType = "Electric"
+		device_file = "D_PowerMeter1.xml",
+		states = {
+			{service = "urn:micasaverde-com:serviceId:EnergyMetering1", variable = "Watts", DZData = "Data", pattern = " Watt"},
+			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
+		}
+	},  
 	Generic = {
 		device_file = "D_GenericSensor1.xml",
 		states = {
@@ -499,6 +515,8 @@ local function devicetypeconvert(DZType, DZSubType, DZSwitchType)
 			end
 		end
 	end
+  if DZType == "General" and DZSubType == "kWh" then DZType = "ElectricMeter" end
+  if DZType == "Usage" and DZSubType == "Electric" then DZType = "ElectricUsage" end
 	if not DZ2VeraMap[DZType] then DZType = "Generic" end -- no match with list of specific known "vera like" devices
 	return DZType
 end

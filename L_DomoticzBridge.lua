@@ -1,10 +1,10 @@
 ABOUT = {
   NAME          = "DomoticzBridge",
-  VERSION       = "0.14",
+  VERSION       = "0.15",
   DESCRIPTION   = "DomoticzBridge plugin for openLuup, based on VeraBridge",
   AUTHOR        = "@logread, based on code from @akbooer",
   COPYRIGHT     = "(c) 2016 logread",
-  DOCUMENTATION = "https://github.com/999LV/DomoticzBridge/blob/master/README.md",
+  DOCUMENTATION = "https://github.com/999LV/DomoticzBridge/raw/master/documentation/DomoticzBridge.pdf",
 }
 --[[
 
@@ -19,15 +19,21 @@ NB. this version ONLY works in openLuup
 	2016-08-06	alpha version 0.01 to prove concept
 	2016-08-19	alpha version 0.05 functional with basic test set of devices
 	2016-08-20	alpha verison 0.06 simplify translation of luup actions into Domoticz API calls
-								   added dimmer device - still debug needed though
+                                 + added dimmer device - still debug needed though
 	2016-08-21	alpha version 0.07 improved actions code - dimmer device and PushOnButton bugs corrected
 	2016-08-21	alpha version 0.08 smoke sensor and tripped info for both smoke and motion sensors
 	2016-08-22	alpha version 0.09 major change to device creation... add all default variables, not just the ones cloned from Domoticz
 	2016-08-26	alpha version 0.10 code optimization and cleanup for Domoticz API calls
 	2016-08-26	alpha version 0.11 WIP: variable change function to address some device actions (e.g. security sensors armed/tripped)
 	2016-08-31	alpha version 0.12 first public release on Alt App Store
-  2016-11-24  beta version 0.13 - bug fix for dimmers/blinds level
-  2016-11-28  beta version 0.14 - added support for power meters
+  2016-11-24  beta version 0.13 bug fix for dimmers/blinds level
+  2016-11-28  beta version 0.14 added support for power meters
+  2016-12-13  beta version 0.15 implemented device mirroring from openLuup to Domoticz
+                                + improved remote devices polling and actions handling code
+                                + bugfix for excluded devices
+                                + bugfix for multiple Vera or Domoticz bridges !!!
+                                - known bug to fix in future version: possible timeout on action http calls (but action handling works,
+                                  just the feeback sometimes times out)
 
 This program is free software: you can redistribute it and/or modify
 it under the condition that it is for private or home useage and
@@ -42,6 +48,9 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 local devNo                      -- our device number
 local DZport	= "8084"	-- default port of the Domoticz server
 
+local bridgestypes = "VeraBridge, DomoticzBridge" --[[ device types that need to be checked for multiple bridges present
+                                                    and proper offset calculations ]]
+
 local chdev		= require "openLuup.chdev"
 local json		= require "openLuup.json"
 local rooms		= require "openLuup.rooms"
@@ -53,8 +62,10 @@ local loader	= require "openLuup.loader" -- thank @akbooer for the hint about de
 local http		= require "socket.http"
 
 local SID_DZB = "urn:upnp-org:serviceId:DomoticzBridge:1"
-local pollmap = {} -- bi-directional index for local/remote variables polling loop and update handlers
+local pollmap = {} -- table of local/remote variables polling loop and update handlers
 local actionmap = {} -- bi-directional index for device actions
+local cloneddevmap = {} -- index table of cloned variables for each cloned device idx
+local actionhash = {} -- reverse lookup hash table for device/service/action index to actionmap index 
 
 local ip                          -- remote machine ip address
 local POLL_DELAY = 60             -- number of seconds between remote polls
@@ -72,6 +83,7 @@ local SID = {
 
 local Mirrored          -- mirrors is a set of device IDs for 'reverse bridging', not to be cloned
 local MirrorHash        -- reverse lookup: local hash to remote device ID
+local MirrorValue       -- added by logread... type of value (nvalue or svalue) for the mirror device setting
 local HouseModeMirror   -- flag with one of the following options
 local HouseModeTime = 0 -- last time we checked
 
@@ -275,6 +287,12 @@ local function datetoepoch(datestring)
 	return os.time{year=year, month=month, day=day, hour=hour, min=minutes, sec=seconds}
 end
 
+-- revised "is_to_be_cloned" function to just work with a Domoticz idx
+local function is_dev_to_be_cloned(idx)
+  idx = tonumber(idx) or 0
+  return not(Excluded[idx] or Mirrored[idx])
+end
+
 --[[
 	**************************************************************************************************************************
 	*                    THIS SECTION HOLDS ORIGINAL VERA BRIDGE FUNCTIONS INTERFACING WITH OPENLUUP                         *
@@ -295,7 +313,10 @@ local function setVar (name, value, service, device)
   device = device or devNo
   local old = luup.variable_get (service, name, device)
   if tostring(value) ~= old then
-   luup.variable_set (service, name, value, device)
+    luup.variable_set (service, name, value, device)
+    return true
+  else
+    return false
   end
 end
 
@@ -426,9 +447,8 @@ local function build_families (devices)
 end
 
 -- return true if device is to be cloned
--- note: these are REMOTE devices from the Vera status request
--- consider: ZWaveOnly, Included, Excluded (...takes precedence over the first two)
--- and Mirrored, a sequence of "remote = local" device IDs for 'reverse bridging'
+-- note: these are REMOTE devices from the Domoticz status request
+-- consider: Excluded or Mirrored, a sequence of "remote = local" device IDs for 'reverse bridging'
 
 -- plus @explorer modification
 -- see: http://forum.micasaverde.com/index.php/topic,37753.msg282098.html#msg282098
@@ -502,12 +522,12 @@ local function devicetypeconvert(DZType, DZSubType, DZSwitchType)
 	if string.match(DZType, "Switch") or string.match(DZType, "Light") then -- this is a switch or light and we need to look at SubType / SwitchType (Domoticz is messy there...)
 		local DZSubType = cleanstring(DZSubType)
 		if DZSubType == "Switch" or DZSubType == "AC" or DZSubType == "SelectorSwitch" then
-			local 	DZSwitchType = cleanstring(DZSwitchType)
-			if 		DZSwitchType == "MotionSensor" or
+			local DZSwitchType = cleanstring(DZSwitchType)
+			if 	DZSwitchType == "MotionSensor" or
 					DZSwitchType == "SmokeDetector" or
 					DZSwitchType == "PushOnButton" or
 					DZSwitchType == "Dimmer"
-			then	DZType = DZSwitchType
+			then DZType = DZSwitchType
 			elseif
 					string.match(DZSwitchType, "Blinds") then DZType = "Blinds"
 			else
@@ -531,15 +551,12 @@ local function DZAPI(APIcall, logmessage)
 		retdata, _ = json.decode(retdata)
 		if retdata.status == "OK" then
 			result = "API responded success"
-			--luup.set_failure(0)
 		else
 			result = "API responded error !"
-			--luup.set_failure(2) -- simulate authentication error to show device in red in the UI (NOT WORKING FOR NOW ???)
 		end
 	else
 		result = "Network error, Domoticz API not reachable !"
-		--luup.set_failure(2) -- simulate authentication error to show device in red in the UI (NOT WORKING FOR NOW ???)
-	end
+  end
 	nicelog({logmessage, " ", result})
 	return retdata
 end
@@ -556,8 +573,11 @@ local function GetDZData(deviceidx)
 	end
 
 	DZData = DZAPI(APIcall, "device(s) polling call to Domoticz:")
-
-	return DZData.result, DZData.ActTime -- returns a table with the devices data and the timestamp of the data
+  if DZData then
+    return DZData.result, DZData.ActTime -- returns a table with the devices data and the timestamp of the data
+  else
+    return {}
+  end
 end
 
 -- dealing with the fact that Domoticz variables can have very different formats compared to openLuup
@@ -631,6 +651,9 @@ local function BuildDevice(device, context)
 			local tmap = tablecopy(state) --{}
 			tmap.idx = device.id
 			table.insert(pollmap, tmap) -- pollmap is used in the polling loop to match Domoticz variables with openLuup's
+      local varmap = cloneddevmap[device.id] or {}
+      table.insert(varmap, #pollmap)
+      cloneddevmap[device.id] = varmap -- for each device id, create an index of polled variables
 		end
 	end
 
@@ -647,6 +670,9 @@ local function BuildDevice(device, context)
 			local actiontable = tablecopy(action)
 			actiontable.idx = device.id
 			table.insert(actionmap, actiontable) -- actionmap is used to match Domoticz actions with openLuup actions
+      hash = table.concat({actiontable.idx, actiontable.service, actiontable.action}, ".")
+      actionhash[hash] = #actionmap
+--      nicelog({"action table hash = ", hash, " maps to actionmap ", actionhash[hash]})
 		end
 	end
 
@@ -665,15 +691,17 @@ local function BuildUserData()
 	virtualuserdata.devices = {}
 	local DZData = GetDZData()
 	for _, DZDev in pairs(DZData) do -- loop DZ devices
-		device = {}
-		device.id = DZDev.idx
-		device.name = string.gsub(DZDev.Name, "[%_%-]", " ") -- DEV to allow better display in AltUI
-		device.id_parent = 0 -- we assume all Domoticz devices to be level 1 children to the controller
-		device.DZType = DZDev.Type -- the original Domoticz type
-		device.DZSubType = DZDev.SubType -- the original Domoticz subtype
-		device.DZSwitchType = DZDev.SwitchType or "" -- if this is a switch we need to capture this as well
-		device=BuildDevice(device, DZDev)
-		table.insert(virtualuserdata.devices, device) -- we are done with this device
+		if is_dev_to_be_cloned(DZDev.idx) then
+      device = {}
+      device.id = DZDev.idx
+      device.name = string.gsub(DZDev.Name, "[%_%-]", " ") -- DEV to allow better display in AltUI
+      device.id_parent = 0 -- we assume all Domoticz devices to be level 1 children to the controller
+      device.DZType = DZDev.Type -- the original Domoticz type
+      device.DZSubType = DZDev.SubType -- the original Domoticz subtype
+      device.DZSwitchType = DZDev.SwitchType or "" -- if this is a switch we need to capture this as well
+      device=BuildDevice(device, DZDev)
+      table.insert(virtualuserdata.devices, device) -- we are done with this device
+    end
 	end
 	return virtualuserdata
 end
@@ -684,7 +712,7 @@ end
 function updatevar(serviceId, variable, value, devNo)
 
 	-- let's first update the required variable itself
-	setVar (variable, value, serviceId, devNo)
+	local change = setVar (variable, value, serviceId, devNo)
 
 	-- then go for possible associations...
 
@@ -697,10 +725,11 @@ function updatevar(serviceId, variable, value, devNo)
 		if tonumber(value) == 1 then -- the sensor tripped
 			setVar("LastTrip", os.time(), serviceId, devNo)
 			if tonumber(Armed) == 1 then ArmedTripped = "1" end
-		else
-			setVar("LastUnTrip", os.time(), serviceId, devNo)
 		end
 		setVar("ArmedTripped", ArmedTripped, serviceId, devNo)
+    if change and tonumber(value) == 0 then -- the sensor was previously tripped but now it is not...
+      setVar("LastUnTrip", os.time(), serviceId, devNo)
+    end
 	end
 
 	-- this requires some work to handle complex devices in the future
@@ -709,21 +738,20 @@ end
 
 -- the function handling the polling requests, either for comprehensive or device specific polling
 function polling(deviceidx)
-	nicelog("Begin Domoticz polling !")
+--	nicelog("Begin Domoticz polling !")
 	local IndexedDZData = {}
 	local tempval
 	local DZData, timestamp = GetDZData(deviceidx)
 	luup.variable_set(SID_DZB, "DataTimestamp", timestamp, devNo)
-	for _, v in pairs(pollmap) do -- loop the table holding the devices/variables bridged
-		for _, DZv in pairs(DZData) do -- for each device/variable in the table, do scan the DZ Data for matches
-			if DZv.idx == v.idx then
-				tempval = convertvariable(v.variable, DZv[v.DZData], v)
-				if tempval then updatevar(v.service, v.variable, tempval, OFFSET + v.idx) end
-				break -- avoid checking other devices once we have found a match
-			end
-		end
-	end
-	nicelog("Finished Domoticz polling !")
+  for _, DZv in pairs(DZData) do -- loop the device list received from Domoticz (either full or partial)
+    if cloneddevmap[DZv.idx] then -- this is a deviced that is cloned
+      for _, v in pairs(cloneddevmap[DZv.idx]) do -- loop the index table for cloned variables associated to the device
+        tempval = convertvariable(pollmap[v].variable, DZv[pollmap[v].DZData], pollmap[v])
+        if tempval then updatevar(pollmap[v].service,  pollmap[v].variable, tempval, OFFSET + DZv.idx) end
+      end
+    end
+  end  
+--	nicelog("Finished Domoticz polling !")
 end
 
 -- the polling loop !
@@ -737,21 +765,29 @@ end
 -- This is called by the companion script "script_device_openLuup.lua" to be installed in the appropriate ./domoticz/scripts/lua folder.
 -- Each time a Domoticz device changes status, the below handler is called and prompts a ad-hoc polling of the relevant device if cloned in openLuup
 function DZData_update(lul_request, lul_parameters, lul_outputformat)
-	local err = true
+	local status = 0 -- 0 = polling error, 1 = device ignored as excluded or mirrored by bridge, 2 = change processed
 	for key, value in pairs(lul_parameters) do
 		if key == "idx" then
 			for idx in value:gmatch "%d+" do -- loop each idx received in CSV string format... actually it seems that only one idx at a time is ever received ?
-				nicelog({"Received change notification from Domoticz - Device = ", idx or ""}) 
-				if tonumber(idx) ~= 0 then
-					err = false
-					polling(idx)
+				nicelog({"Received change notification from Domoticz - Device = ", idx or ""})
+        local nidx = tonumber(idx)
+				if nidx ~= 0 then
+					if is_dev_to_be_cloned(idx) then
+            status = 2
+            polling(idx)
+          else
+            status = 1
+            nicelog({"Change notification ignored for excluded or mirrored device ", idx})
+          end
 				end
 			end
 		end
 	end
-	if err then
+	if status == 0 then
 		return "openLuup: Domoticz http request invalid: no device idx found !!!", "text/plain"
-	else
+	elseif status == 1 then
+    return "openLuup: Domoticz data change ignored for excluded or mirrored device", "text/plain"
+  else
 		return "openLuup: Domoticz data change received OK", "text/plain"
 	end
 end
@@ -801,32 +837,23 @@ local function generic_action (serviceId, name)
 	local function job (lul_device, lul_settings)
 		local devNo = remote_by_local_id (lul_device)
 		if not devNo then return end        -- not a device we have cloned
-		local matchfound = false
 		local message = "Action table match: %s - %s - %s"
-		for _, action in pairs(actionmap) do
-			if action.idx == tostring(devNo) and action.service == lul_settings.serviceId and action.action == lul_settings.action then
-				matchfound = true
-				nicelog(message:format(tostring(devNo), tostring(lul_settings.serviceId), tostring(lul_settings.action)))
-				local APIcall = "/json.htm?type=command&param="
-				local value = lul_settings[action.name]
-
-				if action.boolean then
-					local test = tonumber(value) > 0
-					if action.inverted then test = not test end -- Domoticz treats blinds in inverted manner for commands (on = closed)
-					if test then value = "On" else value = "Off" end
-				end
-
-				if action.self then -- this is an action for a local variable within the openLuup device
-					luup.variable_set(action.service, action.command, value, OFFSET + tonumber(action.idx))
-				else -- this is an action for Domoticz
-					APIcall = table.concat{APIcall, string.format(action.command, devNo, value)}
-					DZAPI(APIcall, "Action handler call to Domoticz:")
-				end
-				break -- we can stop here as we finished the action conversion
+    local hash = table.concat({devNo, lul_settings.serviceId, lul_settings.action}, ".")
+    local action = actionmap[actionhash[hash]]
+    if action then
+			local APIcall = "/json.htm?type=command&param="
+			local value = lul_settings[action.name]
+			if action.boolean then
+				local test = tonumber(value) > 0
+				if action.inverted then test = not test end -- Domoticz treats blinds in inverted manner for commands (on = closed)
+				if test then value = "On" else value = "Off" end
 			end
-		end
-
-		if matchfound then
+			if action.self then -- this is an action for a local variable within the openLuup device
+				luup.variable_set(action.service, action.command, value, OFFSET + tonumber(action.idx))
+			else -- this is an action for Domoticz
+				APIcall = table.concat{APIcall, string.format(action.command, devNo, value)}
+				DZAPI(APIcall, "Action handler call to Domoticz:")
+			end
 			return 4, 0
 		else
 			local message = "service/action not implemented: %d.%s.%s"
@@ -871,10 +898,11 @@ end
 -- find other bridges in order to establish base device number for cloned devices
 local function findOffset ()
   local offset
-  local my_type = luup.devices[devNo].device_type
+--  local my_type = luup.devices[devNo].device_type
   local bridges = {}      -- devNos of ALL bridges
   for d, dev in pairs (luup.devices) do
-    if dev.device_type == my_type then
+--    if dev.device_type == my_type then
+    if string.find(bridgestypes, dev.device_type) then -- modified by logread
       bridges[#bridges + 1] = d
     end
   end
@@ -899,18 +927,18 @@ end
 -- MIRRORS
 --
 
--- openLuup.mirrors syntax is:
--- <VeraIP>
--- <VeraDeviceId> = <openLuupDeviceId>.<serviceId>.<variableName>
--- ...
---[==[
+--[==[ openLuup.dzmirrors syntax is:
+<DomoticzIP>
+<Domoticz Device Idx>.<nvalue or svalue> = <openLuupDeviceId>.<serviceId>.<variableName>
+ 
+more info on nvalue and svalue at https://www.domoticz.com/wiki/Domoticz_API/JSON_URL's#Update_devices.2Fsensors
 
-luup.attr_set ("openLuup.mirrors", [[
-192.168.99.99
-82 = 15.urn:upnp-org:serviceId:TemperatureSensor1.CurrentTemperature
-83 = 16.urn:micasaverse-com:serviceId:HumiditySensor1.CurrentLevel
-85 = 17.urn:cd-jackson-com:serviceId:SystemMonitor.memoryAvailable
-85 = 17.urn:cd-jackson-com:serviceId:SystemMonitor.systemLuupRestartTime
+example:
+
+luup.attr_set ("openLuup.dzmirrors", [[
+127.0.0.1
+82.svalue = 15.urn:upnp-org:serviceId:TemperatureSensor1.CurrentTemperature
+83.nvalue = 16.urn:micasaverde-com:serviceId:HumiditySensor1.CurrentLevel
 ]])
 
 --]==]
@@ -919,8 +947,9 @@ luup.attr_set ("openLuup.mirrors", [[
 -- returning set of devices to ignore in cloning
 -- and hash table for variable watch
 local function set_of_mirrored_devices ()
-  local Minfo = luup.attr_get "openLuup.mirrors"      -- this attribute set at startup
+  local Minfo = luup.attr_get "openLuup.dzmirrors"      -- this attribute set at startup
   local mirrored = {}
+  local mirrorvalue = {}
   local hashes = {}                     -- hash table of all mirrored variables
   local our_ip = false                  -- set to true when we're parsing our own data
   luup.log "reading mirror info..."
@@ -929,31 +958,39 @@ local function set_of_mirrored_devices ()
     if ip_info then
       our_ip = ip_info == ip
     elseif our_ip then
-      local rem, lcl, srv, var  = line:match "^%s*(%d+)%s*=%s*(%d+)%.(%S+)%.(%S+)"
+      local rem, xvalue, lcl, srv, var  = line:match "^%s*(%d+)%.(%S+)%s*=%s*(%d+)%.(%S+)%.(%S+)"
       if var then
         -- set up device watch
         rem = tonumber (rem)
         lcl = tonumber (lcl)
-        luup.log (("mirror: rem=%s, lcl=%d.%s.%s"): format (rem, lcl, srv, var))
+        luup.log (("mirror: rem=%s, value=%s lcl=%d.%s.%s"): format (rem, xvalue, lcl, srv, var))
         local m = mirrored[rem] or {}                       -- flag remote device as a mirror, so don't clone locally
         local hash = table.concat ({lcl, srv, var}, '.')    -- build hash key
         hashes[hash] = rem
         m[#m+1] = {lcl=lcl, srv=srv, var=var, hash=hash}    -- add to list of watched vars for this device
         mirrored[rem] = m
+        mirrorvalue[rem] = xvalue
       end
     end
   end
-  return mirrored, hashes
+  return mirrored, hashes, mirrorvalue
 end
 
 -- Mirror watch callbacks
 
 function VeraBridge_Mirror_Callback (dev, srv, var, _, new)
   local hash = table.concat ({dev, srv, var}, '.')
-  local request = "http://%s:3480/data_request?id=variableset&DeviceNum=%d&serviceId=%s&Variable=%s&Value=%s"
   local rem = MirrorHash[hash]
   if rem then   --  send to remote device
-    luup.inet.wget (request: format(ip, rem, srv, var, url.escape(new)))
+    local APICall = table.concat({"/json.htm?type=command&param=udevice&idx=", tostring(rem)})
+    if MirrorValue[rem] == "nvalue" or MirrorValue[rem] == "svalue" then
+      APICall = table.concat{APICall, "&", MirrorValue[rem], "=", url.escape(tostring(new))}
+--    if MirrorValue[rem] == "nvalue" then APICall = table.concat{APICall, "&nvalue=", url.escape(tostring(new))} end
+--    if MirrorValue[rem] == "svalue" then APICall = table.concat{APICall, "&svalue=", url.escape(tostring(new))} end
+      DZAPI(APICall, "Mirror device update sent to Domoticz : ")
+    else
+      nicelog("Invalid variable type for Domoticz device mirror !")
+    end
   end
 end
 
@@ -961,9 +998,10 @@ end
 local function watch_mirror_variables (mirrored)
   for rem, mirror in pairs (mirrored) do
     for _, v in ipairs (mirror) do
+      nicelog({"setting up mirror variable watch for ", v.srv, v.var, v.lcl})
       luup.variable_watch ("VeraBridge_Mirror_Callback", v.srv, v.var, v.lcl)   -- start watching
       local val = luup.variable_get (v.srv, v.var, v.lcl)
-      VeraBridge_Mirror_Callback (rem, v.srv, v.var, nil, val or '')  -- use the callback to set the values
+      VeraBridge_Mirror_Callback (v.lcl, v.srv, v.var, nil, val or '')  -- use the callback to set the values
     end
   end
   return
@@ -972,80 +1010,13 @@ end
 --
 -- Bridge ACTION handler(s)
 --
-
--- copy all device files and icons from remote vera
--- (previously performed by the openLuup_getfiles utility)
+--[[ REMOVED from original VeraBridge plugin as copying Vera files not applicable
+  user needs to manually install the original device files and icons from remote vera
+  (can be be performed by the openLuup_getfiles utility that can be obtained from 
+  https://raw.githubusercontent.com/akbooer/openLuup/v0.8.2/Utilities/openLuup_getfiles.lua )
+]]
 function GetVeraFiles ()
-
-  local code = [[
-
-  local lfs = require "lfs"
-  local f = io.open ("/www/directory.txt", 'w')
-  for fname in lfs.dir ("%s") do
-    if fname:match "lzo$" or fname: match "png$" then
-      f:write (fname)
-      f:write '\n'
-    end
-  end
-  f:close ()
-
-  ]]
-
-  local function get_directory (path)
-    local template = "http://%s:3480/data_request?id=action" ..
-                      "&serviceId=urn:micasaverde-com:serviceId:HomeAutomationGateway1" ..
-                      "&action=RunLua&Code=%s"
-    local request = template:format (ip, url.escape (code: format(path)))
-
-    local status, info = luup.inet.wget (request)
-    if status ~= 0 then luup.log ("error creating remote directory listing: " .. status) return end
-
-    status, info = luup.inet.wget ("http://" .. ip .. "/directory.txt")
-    if status ~= 0 then luup.log ("error reading remote directory listing: " .. status) return end
-
-    return info
-  end
-
-  local function get_files_from (path, dest, url_prefix)
-    dest = dest or '.'
-    url_prefix = url_prefix or ":3480/"
-    luup.log ("getting files from " .. path)
-    local info = get_directory (path)
-    for x in info: gmatch "%C+" do
-      local fname = x:gsub ("%.lzo",'')   -- remove unwanted extension for compressed files
-      local status, content = luup.inet.wget ("http://" .. ip .. url_prefix .. fname)
-      if status == 0 then
-        luup.log (table.concat {#content, ' ', fname})
-
-        local f = io.open (dest .. '/' .. fname, 'wb')
-        f:write (content)
-        f:close ()
-      else
-        luup.log ("error: " .. fname)
-      end
-    end
-  end
-
-  -- device, service, lua, json, files...
-  lfs.mkdir "files"
-  get_files_from ("/etc/cmh-ludl/", "files", ":3480/")
-  get_files_from ("/etc/cmh-lu/", "files", ":3480/")
-  luup.log "...end of device files"
-
-  -- icons
-  lfs.mkdir "icons"
-  local _,b,_ = BuildVersion: match "(%d+)%.(%d+)%.(%d+)"    -- branch, major minor
-  local major = tonumber(b)
-
-  if major then
-    if major > 5 then     -- UI7
-      get_files_from ("/www/cmh/skins/default/img/devices/device_states/",
-        "icons", "/cmh/skins/default/img/devices/device_states/")
-    else                  -- UI5
-      get_files_from ("/www/cmh/skins/default/icons/", "icons", "/cmh/skins/default/icons/")
-    end
-    luup.log "...end of icon files"
-  end
+  nicelog("Action not implemented in Domoticz Plugin !!!")
 end
 
 --[[
@@ -1068,8 +1039,8 @@ function init (lul_device)
   -- User configuration parameters: @explorer and @logread options
 
 	DZport	= uiVar("DomoticzPort", DZport)	-- port on which the Domoticz server listens... default is 8084
---	ZWaveOnly = uiVar ("ZWaveOnly", '')         -- if set to true then only Z-Wave devices are considered by VeraBridge.
-	Included  = uiVar ("IncludeDevices", '')    -- list of devices to include even if ZWaveOnly is set to true.
+  uiVar("Documentation", ABOUT.DOCUMENTATION)
+  Included  = uiVar ("IncludeDevices", '')    -- list of devices to include even if ZWaveOnly is set to true.
 	Excluded  = uiVar ("ExcludeDevices", '')    -- list of devices to exclude from synchronization by VeraBridge,
 												-- ...takes precedence over the first two.
 
@@ -1081,7 +1052,7 @@ function init (lul_device)
   ZWaveOnly = false -- ZWaveOnly == "true"                         -- convert to logical
   Included = convert_to_set (Included)
   Excluded = convert_to_set (Excluded)
-  Mirrored, MirrorHash = set_of_mirrored_devices ()       -- create set and hash of remote device IDs which are mirrored
+  Mirrored, MirrorHash, MirrorValue = set_of_mirrored_devices ()       -- create set and hash of remote device IDs which are mirrored
 
   luup.devices[devNo].action_callback (generic_action)     -- catch all undefined action calls
 
@@ -1089,9 +1060,6 @@ function init (lul_device)
   Ndev, BuildVersion = GetUserData ()
 
   do -- version number
-    --local y,m,d = ABOUT.VERSION:match "(%d+)%D+(%d+)%D+(%d+)"
-    --local version = ("v%d.%d.%d"): format (y%2000,m,d)
-    --setVar ("Version", version)
     setVar ("Version", ABOUT.VERSION)
   end
 
@@ -1099,9 +1067,9 @@ function init (lul_device)
   setVar ("DisplayLine2", ip, SID.altui)
 
   if Ndev > 0 then
- --DEV TEMP   watch_mirror_variables (Mirrored)         -- set up variable watches for mirrored devices
-	luup.call_delay("pollfullDZData", POLL_DELAY) -- deferred start for polling as we just read everything when creating user_data
-	sethandler() -- register http handler for Domoticz openLuup script to call and notify of data changes
+    sethandler() -- register http handler for Domoticz openLuup script to call and notify of data changes
+    watch_mirror_variables (Mirrored)         -- set up variable watches for mirrored devices
+    luup.call_delay("pollfullDZData", POLL_DELAY) -- deferred start for polling as we just read everything when creating user_data
     luup.set_failure (0)                      -- all's well with the world
   else
     luup.set_failure (2)                      -- say it's an authentication error

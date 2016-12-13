@@ -1,9 +1,10 @@
 --[[	Domoticz to openLuup notification of "devicechanged"
 		Author : Logread
-		Version: Alpha 2016-08-13
+		Version: beta 2016-12-10
 		Requires:
 			1) Domoticz installed
-			 2) openLuup installed, with DomoticzBridge plugin installed
+      2) Curl utility installed on the system running Domoticz
+      3) openLuup system running with DomoticzBridge plugin installed through the AltUI App Store
 		Install instructions:
 			1) Edit the openLuupIP variable in this script to change the IP address of the hardware running openLuup
 			2) place this script in the [Domoticz path]/scripts/lua/ folder (e.g. /home/pi/domoticz/scripts/lua)
@@ -16,27 +17,55 @@
 			This involves more network traffic than desirable, but since most likely Domoticz and openLuup will
 			reside on the same LAN/Subnet if not the same physical hardware, this should not impact performance or
 			responsiveness of either openLuup or Domoticz.
-			NOTE: To simplify installation, code has been written to rely on Domoticz's built-in http call (avoiding
-			the need for external lua modules), but this means there is no error checking... any errors will need
-			to be tracked from openLuup's log file (/etc/cmh-ludl/LuaUPnP.log)
 --]]
 
 commandArray = {}
 
-local openLuupIP = "127.0.0.1" -- assumes openLuup running on same machine as Domoticz
--- To Do : get IP from a Domoticz "user variable"
-
-local url = "http://%s:3480/data_request?id=lr_DZUpdate&idx=%s" -- DO NOT CHANGE !!!
 local idxlist = {}
+-- url to notify the DomoticzBridge plugin on the openLuup system of a device change 
+local handlerurl = "http://%s:3480/data_request?id=lr_DZUpdate&idx=%s" -- DO NOT CHANGE !!!
+
+-- read configuration from the Domoticz uservariables if they exist
+local openLuupIP = uservariables["openLuupIP"] or "127.0.0.1"
+local openLuupNoNotify = uservariables["openLuupNoNotify"] or ""
+
+--[[NOTE: Since Domoticz Lua scripts cannot rely on socket.http module, and also given that Domoticz's built-in http
+    call does not provide success/failure feedback, the script relies on a call to the underlying os to perform a call
+    to the curl utility... Not ideal but curl is installed on most systems by default (including windows 10) --]]
+local function curl(url)
+  local completeurl = table.concat({'curl --keepalive "', url, '"'})
+  local f = assert(io.popen(completeurl, 'r'))
+  local s = assert(f:read('*a'))
+  f:close()
+  return s
+end
+
+local function is_in_csv_list(csvstring, value)
+  value = tostring(value) or ""
+  csvstring = csvstring or ""
+  local isthere = false
+  for svalue in csvstring:gmatch("%d+") do
+    if tonumber(svalue) == tonumber(value) then
+      isthere = true
+      break
+    end
+  end
+  return isthere
+end
+
 for name, _ in pairs(devicechanged) do
 	local idx = otherdevices_idx[name] -- convert the device name to its index
-	if idx then
+	if idx and not(is_in_csv_list(openLuupNoNotify, idx)) then
 		table.insert(idxlist, idx) 	-- build a table of all devices changed
 	end
 end
-local csvstring = table.concat(idxlist, ",") or "" -- make the table of devices a comma separated string for the http call
-local cmd = string.format(url, openLuupIP, csvstring)
-print(cmd) -- log for debug
-commandArray["OpenURL"] = cmd
+if next(idxlist) then
+  local csvstring = table.concat(idxlist, ",") or "" -- make the table of devices a comma separated string for the http call
+  local cmd = string.format(handlerurl, openLuupIP, csvstring)
+  print(cmd) -- log for debug
+  print(curl(cmd))
+-- else
+--  print("Device change ignored as per 'openLuupNoNotify' uservariable") -- log for debug
+end
 
 return commandArray

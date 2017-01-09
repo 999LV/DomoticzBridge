@@ -1,6 +1,6 @@
 ABOUT = {
   NAME          = "DomoticzBridge",
-  VERSION       = "0.15",
+  VERSION       = "0.16",
   DESCRIPTION   = "DomoticzBridge plugin for openLuup, based on VeraBridge",
   AUTHOR        = "@logread, based on code from @akbooer",
   COPYRIGHT     = "(c) 2016 logread",
@@ -34,6 +34,8 @@ NB. this version ONLY works in openLuup
                                 + bugfix for multiple Vera or Domoticz bridges !!!
                                 - known bug to fix in future version: possible timeout on action http calls (but action handling works,
                                   just the feeback sometimes times out)
+  2017-01-09  beta version 0.16 support for domoticz contact sensors (door sensor in openLuup)
+                                + bugfix in openLuup domoticz script to avoid timeout on certain http calls
 
 This program is free software: you can redistribute it and/or modify
 it under the condition that it is for private or home useage and
@@ -216,6 +218,19 @@ local DZ2VeraMap = {
 		device_file = "D_SmokeSensor1.xml",
 		states = {
 			{service = "urn:micasaverde-com:serviceId:SecuritySensor1", variable = "Tripped", DZData = "Status", boolean = true},
+--			{service = "urn:micasaverde-com:serviceId:SecuritySensor1", variable = "LastTrip", DZData = "LastUpdate", epoch = true},
+			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
+		},
+		actions = {
+			{service = "urn:micasaverde-com:serviceId:SecuritySensor1",
+			action = "SetArmed", name = "newArmedValue",
+			command = "Armed", self = true}
+		}
+	},
+  Contact = { -- original Type = "Light/Switch" with SubType = "Switch" and SwitchType = "Contact"
+		device_file = "D_DoorSensor1.xml",
+		states = {
+			{service = "urn:micasaverde-com:serviceId:SecuritySensor1", variable = "Tripped", DZData = "Status", contact = true},
 --			{service = "urn:micasaverde-com:serviceId:SecuritySensor1", variable = "LastTrip", DZData = "LastUpdate", epoch = true},
 			{service = "urn:micasaverde-com:serviceId:HaDevice1", variable = "BatteryLevel", DZData = "BatteryLevel"}
 		},
@@ -525,6 +540,7 @@ local function devicetypeconvert(DZType, DZSubType, DZSwitchType)
 			local DZSwitchType = cleanstring(DZSwitchType)
 			if 	DZSwitchType == "MotionSensor" or
 					DZSwitchType == "SmokeDetector" or
+          DZSwitchType == "Contact" or
 					DZSwitchType == "PushOnButton" or
 					DZSwitchType == "Dimmer"
 			then DZType = DZSwitchType
@@ -588,6 +604,7 @@ local function convertvariable(variable, value, format_table)
 		if format_table.pattern then tempval = string.gsub(tempval, format_table.pattern, "") end
 		if format_table.epoch then tempval = datetoepoch(tempval) end
 		if format_table.boolean then if tempval == "Off" then tempval = "0" else tempval = "1" end end
+    if format_table.contact then if tempval == "Closed" then tempval = "0" else tempval = "1" end end
 		if variable == "LoadLevelStatus" and (tonumber(tempval) or 0) == 0 then tempval = "0" end -- deals with nil value sent for zero load by Domoticz
 	end
 	return tempval

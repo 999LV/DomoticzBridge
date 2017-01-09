@@ -3,8 +3,7 @@
 		Version: beta 2016-12-10
 		Requires:
 			1) Domoticz installed
-      2) Curl utility installed on the system running Domoticz
-      3) openLuup system running with DomoticzBridge plugin installed through the AltUI App Store
+      2) openLuup system running with DomoticzBridge plugin installed through the AltUI App Store
 		Install instructions:
 			1) Edit the openLuupIP variable in this script to change the IP address of the hardware running openLuup
 			2) place this script in the [Domoticz path]/scripts/lua/ folder (e.g. /home/pi/domoticz/scripts/lua)
@@ -29,17 +28,6 @@ local handlerurl = "http://%s:3480/data_request?id=lr_DZUpdate&idx=%s" -- DO NOT
 local openLuupIP = uservariables["openLuupIP"] or "127.0.0.1"
 local openLuupNoNotify = uservariables["openLuupNoNotify"] or ""
 
---[[NOTE: Since Domoticz Lua scripts cannot rely on socket.http module, and also given that Domoticz's built-in http
-    call does not provide success/failure feedback, the script relies on a call to the underlying os to perform a call
-    to the curl utility... Not ideal but curl is installed on most systems by default (including windows 10) --]]
-local function curl(url)
-  local completeurl = table.concat({'curl --keepalive "', url, '"'})
-  local f = assert(io.popen(completeurl, 'r'))
-  local s = assert(f:read('*a'))
-  f:close()
-  return s
-end
-
 local function is_in_csv_list(csvstring, value)
   value = tostring(value) or ""
   csvstring = csvstring or ""
@@ -63,7 +51,7 @@ if next(idxlist) then
   local csvstring = table.concat(idxlist, ",") or "" -- make the table of devices a comma separated string for the http call
   local cmd = string.format(handlerurl, openLuupIP, csvstring)
   print(cmd) -- log for debug
-  print(curl(cmd))
+  commandArray["OpenURL"] = cmd
 -- else
 --  print("Device change ignored as per 'openLuupNoNotify' uservariable") -- log for debug
 end
